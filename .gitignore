@@ -1,0 +1,16 @@
+﻿.env
+credentials.json
+token.json
+gmail_token.json
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+data/UNSW_NB15_training-set.csv
+data/KDDTrain+.txt
+data/KDDTest+.txt
+eval_results.json
+.DS_Store
+Thumbs.db
+data/UNSW_NB15_testing-set.csv
