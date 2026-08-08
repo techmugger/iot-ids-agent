@@ -32,6 +32,25 @@ Return ONLY valid JSON in this exact shape, no prose, no markdown fences:
 {{"steps": ["step 1 text", "step 2 text", ...]}}
 """
 
+# Used when the Evaluator has already said "NO" once -- instead of throwing
+# away everything and starting a fresh plan (which was causing 200+ second,
+# 8-iteration runs on simple 2-step tasks), we ask ONLY for what's still
+# missing and APPEND it to the existing step list. This preserves progress
+# across replanning cycles instead of redoing completed work.
+CONTINUATION_SYSTEM_PROMPT = """You are the Planner in an agentic AI system, continuing work on a
+task that is not yet complete. Given the original goal and the results of steps already executed,
+determine ONLY the additional steps still needed to fully accomplish the goal. Do NOT repeat steps
+whose results already appear below -- only plan what is genuinely still missing.
+
+Available tools:
+{tool_descriptions}
+
+If the goal is actually already fully accomplished by the results shown, return an empty steps list.
+
+Return ONLY valid JSON in this exact shape, no prose, no markdown fences:
+{{"steps": ["remaining step 1 text", ...]}}
+"""
+
 
 def _tool_descriptions_block() -> str:
     lines = []
@@ -41,18 +60,43 @@ def _tool_descriptions_block() -> str:
 
 
 def planner_node(state: AgentState) -> AgentState:
-    system_prompt = PLANNER_SYSTEM_PROMPT.format(tool_descriptions=_tool_descriptions_block())
-    # NOTE: user_goal is passed as the USER message only (never merged into
-    # the system prompt) -- Section 3.4.1 prompt-injection defense.
-    output = call_groq_json(system_prompt=system_prompt, user_prompt=state["user_goal"])
+    is_continuation = len(state["results"]) > 0
 
-    steps = output.get("steps", [])
-    if not isinstance(steps, list) or not steps:
-        raise ValueError(f"Planner returned no valid steps: {output}")
+    if is_continuation:
+        # Replanning after a "NO" verdict -- ask for remaining work only,
+        # and APPEND to the existing steps rather than replacing them.
+        # current_step_index already equals len(state["steps"]) at this point
+        # (the executor only reaches the evaluator once every prior step has
+        # run), so appending lets execution continue seamlessly without
+        # resetting progress.
+        system_prompt = CONTINUATION_SYSTEM_PROMPT.format(tool_descriptions=_tool_descriptions_block())
+        user_prompt = (
+            f"Original goal: {state['user_goal']}\n\n"
+            f"Steps already executed and their results: {state['results']}\n\n"
+            f"What remaining steps (if any) are still needed?"
+        )
+        output = call_groq_json(system_prompt=system_prompt, user_prompt=user_prompt)
+        new_steps = output.get("steps", [])
+        if not isinstance(new_steps, list):
+            new_steps = []
 
-    state["steps"] = steps
-    state["current_step_index"] = 0
-    logger.info("Planner generated %d steps for session %s", len(steps), state["session_id"])
+        state["steps"] = state["steps"] + new_steps
+        # current_step_index is intentionally NOT reset here.
+    else:
+        system_prompt = PLANNER_SYSTEM_PROMPT.format(tool_descriptions=_tool_descriptions_block())
+        # NOTE: user_goal is passed as the USER message only (never merged into
+        # the system prompt) -- Section 3.4.1 prompt-injection defense.
+        output = call_groq_json(system_prompt=system_prompt, user_prompt=state["user_goal"])
+
+        steps = output.get("steps", [])
+        if not isinstance(steps, list) or not steps:
+            raise ValueError(f"Planner returned no valid steps: {output}")
+
+        state["steps"] = steps
+        state["current_step_index"] = 0
+
+    logger.info("Planner now has %d total step(s) for session %s (continuation=%s)",
+                len(state["steps"]), state["session_id"], is_continuation)
     return state
 
 
